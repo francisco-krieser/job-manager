@@ -51,6 +51,36 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 
 
+def _extract_resume_state(job_type: str, progress_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract resume state from progress data based on job type"""
+    if job_type == "data_processing":
+        return {
+            "last_chunk": progress_data.get("chunk", 0) - 1,  # -1 because we want to resume from this chunk
+            "total_chunks": progress_data.get("total_chunks", 0)
+        }
+    elif job_type == "report_generation":
+        step = progress_data.get("step", "generation")
+        return {
+            "current_step": step,
+            "last_page": progress_data.get("page", 0) - 1 if step == "generation" else 0,
+            "total_pages": progress_data.get("total_pages", 0)
+        }
+    elif job_type == "image_resize":
+        # For image resize, we need to track both image and size indices
+        # Simplified: track image index and size index
+        image_num = progress_data.get("image", 1)
+        size = progress_data.get("size", "")
+        sizes = ["thumb", "medium", "large"]
+        size_idx = sizes.index(size) if size in sizes else 0
+        return {
+            "last_image_idx": image_num - 1,  # Convert to 0-indexed
+            "last_size_idx": size_idx,
+            "total_images": progress_data.get("total", 0) // len(sizes) if progress_data.get("total") else 0,
+            "total_sizes": len(sizes)
+        }
+    return {}
+
+
 async def recover_stale_jobs():
     """Recover jobs with expired locks (self-healing)"""
     now = int(time.time())
@@ -117,6 +147,9 @@ async def process_job_with_heartbeat(job_id: str, receipt_handle: str):
             heartbeat_loop(job_id, receipt_handle)
         )
         
+        # Track current state for checkpoint
+        current_state = None
+        
         try:
             # Process job (yields progress updates)
             async for progress_update in processor.process():
@@ -128,10 +161,24 @@ async def process_job_with_heartbeat(job_id: str, receipt_handle: str):
                         logger.info(f"Job {job_id} cancelled, stopping processing")
                         break
                     if job_status == "paused":
-                        logger.info(f"Job {job_id} paused, stopping processing")
+                        logger.info(f"Job {job_id} paused, saving checkpoint")
+                        # Extract current state from progress update for checkpoint
+                        resume_state = _extract_resume_state(
+                            job_type,
+                            progress_update.get("data", {})
+                        )
+                        # Only update resume_state if it doesn't exist (API route may have saved it)
+                        if not current_job.get("resume_state"):
+                            # Update resume_state without changing status (already paused)
+                            dynamodb.update_resume_state(job_id, WORKER_ID, resume_state)
+                        else:
+                            logger.info(f"Checkpoint already exists for job {job_id}")
                         # Release lock and exit
                         dynamodb.release_lock(job_id, WORKER_ID)
                         break
+                
+                # Update current state for checkpoint
+                current_state = progress_update.get("data", {})
                 
                 # Update progress in DynamoDB
                 dynamodb.update_job_progress(

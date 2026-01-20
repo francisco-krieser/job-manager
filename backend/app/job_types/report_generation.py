@@ -1,7 +1,10 @@
 import asyncio
+import logging
 from decimal import Decimal
 from typing import AsyncIterator, Dict, Any
 from .base import JobProcessor
+
+logger = logging.getLogger(__name__)
 
 
 def to_int(value):
@@ -18,31 +21,44 @@ class ReportGenerationJob(JobProcessor):
         report_type = self.job.get("metadata", {}).get("report_type", "summary")
         pages = to_int(self.job.get("metadata", {}).get("pages", 5))
         
-        yield {
-            "progress": 10,
-            "status": "running",
-            "message": "Gathering data...",
-            "data": {"step": "data_collection"}
-        }
-        await asyncio.sleep(2)
+        # Check for resume state
+        resume_step = None
+        start_page = 0
         
-        yield {
-            "progress": 30,
-            "status": "running",
-            "message": "Analyzing data...",
-            "data": {"step": "analysis"}
-        }
-        await asyncio.sleep(2)
+        if self.resume_state:
+            resume_step = self.resume_state.get("current_step")
+            start_page = to_int(self.resume_state.get("last_page", 0))
+            logger.info(f"Resuming from step '{resume_step}', page {start_page + 1}")
         
-        # Generate pages
-        for i in range(pages):
+        # If not resuming or resuming from early steps, do data collection
+        if not resume_step or resume_step in ["data_collection", None]:
+            yield {
+                "progress": 10,
+                "status": "running",
+                "message": "Gathering data...",
+                "data": {"step": "data_collection"}
+            }
+            await asyncio.sleep(2)
+        
+        # If not resuming or resuming from analysis, do analysis
+        if not resume_step or resume_step in ["data_collection", "analysis", None]:
+            yield {
+                "progress": 30,
+                "status": "running",
+                "message": "Analyzing data...",
+                "data": {"step": "analysis"}
+            }
+            await asyncio.sleep(2)
+        
+        # Generate pages (resume from checkpoint if applicable)
+        for i in range(start_page, pages):
             await asyncio.sleep(1.5)
             progress = 30 + int((i + 1) / pages * 60)
             
             yield {
                 "progress": progress,
                 "status": "running",
-                "message": f"Generating page {i + 1} of {pages}...",
+                "message": f"Generating page {i + 1} of {pages}..." + (" (resumed)" if i == start_page and self.resume_state else ""),
                 "data": {
                     "step": "generation",
                     "page": i + 1,

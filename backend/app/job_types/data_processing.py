@@ -1,8 +1,11 @@
 import asyncio
 import random
+import logging
 from decimal import Decimal
 from typing import AsyncIterator, Dict, Any
 from .base import JobProcessor
+
+logger = logging.getLogger(__name__)
 
 
 def to_int(value):
@@ -21,19 +24,29 @@ class DataProcessingJob(JobProcessor):
         if isinstance(delay, Decimal):
             delay = float(delay)
         
-        for i in range(chunks):
+        # Check for resume state
+        start_chunk = 0
+        if self.resume_state:
+            start_chunk = to_int(self.resume_state.get("last_chunk", 0))
+            # If we already completed this chunk, start from next
+            if start_chunk >= chunks:
+                start_chunk = chunks - 1  # Safety check
+            logger.info(f"Resuming from chunk {start_chunk + 1} of {chunks}")
+        
+        for i in range(start_chunk, chunks):
             # Check if cancelled
             # (In real implementation, this would check DynamoDB)
             
             # Simulate processing
             await asyncio.sleep(delay)
             
-            progress = int((i + 1) / chunks * 100)
+            # Calculate progress accounting for work already done
+            current_progress = int((i + 1) / chunks * 100)
             
             yield {
-                "progress": progress,
+                "progress": current_progress,
                 "status": "running",
-                "message": f"Processed chunk {i + 1} of {chunks}",
+                "message": f"Processed chunk {i + 1} of {chunks}" + (" (resumed)" if i == start_chunk and self.resume_state else ""),
                 "data": {
                     "chunk": i + 1,
                     "total_chunks": chunks,

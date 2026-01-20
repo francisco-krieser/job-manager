@@ -123,7 +123,7 @@ async def resume_job(job_id: str):
 async def pause_job(job_id: str):
     """Pause a running job"""
     # Note: In production, you'd get worker_id from context
-    # For now, we'll just update status
+    # The worker will detect the pause status and save the checkpoint
     job = dynamodb.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -131,12 +131,51 @@ async def pause_job(job_id: str):
     if job.get("status") != "running":
         raise HTTPException(status_code=400, detail="Job is not running")
     
-    # Use service method to pause (releases lock and updates status)
+    # Get current progress data to extract resume state
+    # The worker will actually save the checkpoint, but we need to set status to paused
+    # so the worker can detect it and save the checkpoint
     worker_id = job.get("lock_owner")
     if not worker_id:
         raise HTTPException(status_code=400, detail="Job is not locked by a worker")
     
-    success = dynamodb.pause_job(job_id, worker_id)
+    # Extract resume state from current job state if available
+    # For now, use empty dict - worker will save proper checkpoint when it detects pause
+    resume_state = {}
+    
+    # Try to get resume state from intermediate_results if available
+    intermediate_results = job.get("intermediate_results", [])
+    if intermediate_results:
+        # Get the last progress update
+        last_update = intermediate_results[-1]
+        progress_data = last_update.get("data", {})
+        job_type = job.get("job_type")
+        
+        # Extract resume state based on job type
+        if job_type == "data_processing":
+            resume_state = {
+                "last_chunk": progress_data.get("chunk", 0) - 1,
+                "total_chunks": progress_data.get("total_chunks", 0)
+            }
+        elif job_type == "report_generation":
+            step = progress_data.get("step", "generation")
+            resume_state = {
+                "current_step": step,
+                "last_page": progress_data.get("page", 0) - 1 if step == "generation" else 0,
+                "total_pages": progress_data.get("total_pages", 0)
+            }
+        elif job_type == "image_resize":
+            image_num = progress_data.get("image", 1)
+            size = progress_data.get("size", "")
+            sizes = ["thumb", "medium", "large"]
+            size_idx = sizes.index(size) if size in sizes else 0
+            resume_state = {
+                "last_image_idx": image_num - 1,
+                "last_size_idx": size_idx,
+                "total_images": progress_data.get("total", 0) // len(sizes) if progress_data.get("total") else 0,
+                "total_sizes": len(sizes)
+            }
+    
+    success = dynamodb.pause_job(job_id, worker_id, resume_state)
     if not success:
         raise HTTPException(status_code=400, detail="Cannot pause job")
     
@@ -150,35 +189,14 @@ async def pause_job(job_id: str):
     return {"status": "paused", "job_id": job_id}
 
 
-@router.get("/{job_id}/stream")
-async def stream_job_status(job_id: str):
-    """Stream job status via Server-Sent Events"""
+@router.get("/stream/events")
+async def stream_all_jobs():
+    """Stream all job updates via Server-Sent Events (broadcast)"""
     
     async def event_generator():
         try:
-            # Send initial state from DynamoDB
-            job = dynamodb.get_job(job_id)
-            if job:
-                initial_data = {
-                    'job_id': job_id,
-                    'status': job.get('status'),
-                    'progress': int(job.get('progress', 0)),
-                    'message': 'Initial state',
-                    'timestamp': int(time.time())
-                }
-                # Convert Decimal types for JSON serialization
-                initial_data = convert_decimals(initial_data)
-                yield f"data: {json.dumps(initial_data)}\n\n"
-            else:
-                error_data = {
-                    'error': 'Job not found',
-                    'job_id': job_id
-                }
-                yield f"data: {json.dumps(error_data)}\n\n"
-                return
-            
-            # Subscribe to Redis channel
-            pubsub = await redis_service.subscribe_to_job(job_id)
+            # Subscribe to Redis broadcast channel
+            pubsub = await redis_service.subscribe_to_all_jobs()
             
             try:
                 last_ping = time.time()
@@ -212,7 +230,101 @@ async def stream_job_status(job_id: str):
                         continue
             finally:
                 try:
-                    await pubsub.unsubscribe(f"job:{job_id}")
+                    await pubsub.unsubscribe("jobs:all")
+                    await pubsub.close()
+                except Exception as e:
+                    logger.error(f"Error closing pubsub: {e}")
+        except asyncio.CancelledError:
+            # Client disconnected, this is normal
+            logger.info("SSE broadcast stream cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Error in SSE broadcast stream: {e}", exc_info=True)
+            # Send final error message before closing
+            try:
+                error_data = {
+                    'error': 'Stream closed',
+                    'message': str(e),
+                    'timestamp': int(time.time())
+                }
+                yield f"data: {json.dumps(error_data)}\n\n"
+            except:
+                pass
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@router.get("/{job_id}/stream")
+async def stream_job_status(job_id: str):
+    """Stream job status via Server-Sent Events (uses broadcast with filtering)"""
+    
+    async def event_generator():
+        try:
+            # Send initial state from DynamoDB
+            job = dynamodb.get_job(job_id)
+            if job:
+                initial_data = {
+                    'job_id': job_id,
+                    'status': job.get('status'),
+                    'progress': int(job.get('progress', 0)),
+                    'message': 'Initial state',
+                    'timestamp': int(time.time())
+                }
+                # Convert Decimal types for JSON serialization
+                initial_data = convert_decimals(initial_data)
+                yield f"data: {json.dumps(initial_data)}\n\n"
+            else:
+                error_data = {
+                    'error': 'Job not found',
+                    'job_id': job_id
+                }
+                yield f"data: {json.dumps(error_data)}\n\n"
+                return
+            
+            # Subscribe to Redis broadcast channel
+            pubsub = await redis_service.subscribe_to_all_jobs()
+            
+            try:
+                last_ping = time.time()
+                while True:
+                    # Send ping every 30 seconds to keep connection alive
+                    if time.time() - last_ping > 30:
+                        yield ": ping\n\n"
+                        last_ping = time.time()
+                    
+                    try:
+                        # Use shorter timeout and handle None response
+                        message = await asyncio.wait_for(
+                            pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0),
+                            timeout=1.5
+                        )
+                        if message and message.get('type') == 'message':
+                            # Filter: only send updates for this specific job
+                            try:
+                                update_data = json.loads(message['data'])
+                                if update_data.get('job_id') == job_id:
+                                    yield f"data: {message['data']}\n\n"
+                            except json.JSONDecodeError:
+                                # If not valid JSON, skip
+                                continue
+                    except asyncio.TimeoutError:
+                        # Timeout is expected, continue loop
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error getting message from Redis: {e}")
+                        await asyncio.sleep(1)
+                        continue
+            finally:
+                try:
+                    await pubsub.unsubscribe("jobs:all")
                     await pubsub.close()
                 except Exception as e:
                     logger.error(f"Error closing pubsub: {e}")

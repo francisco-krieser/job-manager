@@ -11,11 +11,14 @@ class JobProcessor(ABC):
     def __init__(self, job: Dict[str, Any]):
         self.job = job
         self.result: Dict[str, Any] = {}
+        # Extract resume_state if it exists
+        self.resume_state = job.get("resume_state")
     
     @abstractmethod
     async def process(self) -> AsyncIterator[Dict[str, Any]]:
         """
         Process the job and yield progress updates.
+        Should check self.resume_state and continue from checkpoint if present.
         Each yield should be a dict with: progress, status, message, data
         """
         pass

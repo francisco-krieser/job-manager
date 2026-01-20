@@ -203,7 +203,7 @@ class DynamoDBService:
             expr_names["#result"] = "result"  # Escape reserved keyword
             expr_values[":result"] = result
         
-        update_expr += "\n            REMOVE lock_owner, lock_expiry, lock_ttl"
+        update_expr += "\n            REMOVE lock_owner, lock_expiry, lock_ttl, resume_state"
         
         self.table.update_item(
             Key={"job_id": job_id},
@@ -285,7 +285,7 @@ class DynamoDBService:
                 UpdateExpression="""
                     SET #status = :cancelled,
                         updated_at = :now
-                    REMOVE lock_owner, lock_expiry, lock_ttl
+                    REMOVE lock_owner, lock_expiry, lock_ttl, resume_state
                 """,
                 ConditionExpression="#status <> :completed",
                 ExpressionAttributeNames={
@@ -306,7 +306,7 @@ class DynamoDBService:
             raise
 
     def resume_job(self, job_id: str) -> bool:
-        """Resume a paused job"""
+        """Resume a paused job (keep resume_state, change status to pending)"""
         now = int(time.time())
         try:
             self.table.update_item(
@@ -315,7 +315,7 @@ class DynamoDBService:
                     SET #status = :pending,
                         updated_at = :now
                 """,
-                ConditionExpression="#status = :paused",
+                ConditionExpression="#status = :paused AND attribute_exists(resume_state)",
                 ExpressionAttributeNames={
                     "#status": "status"
                 },
@@ -325,23 +325,24 @@ class DynamoDBService:
                     ":now": now
                 }
             )
-            logger.info(f"Job {job_id} resumed")
+            logger.info(f"Job {job_id} resumed (will continue from checkpoint)")
             return True
         except ClientError as e:
             if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
-                logger.warning(f"Job {job_id} is not paused")
+                logger.warning(f"Job {job_id} is not paused or missing resume_state")
                 return False
             raise
 
-    def pause_job(self, job_id: str, worker_id: str) -> bool:
-        """Pause a running job"""
+    def pause_job(self, job_id: str, worker_id: str, resume_state: Dict[str, Any]) -> bool:
+        """Pause a running job and save resume state"""
         now = int(time.time())
         try:
             self.table.update_item(
                 Key={"job_id": job_id},
                 UpdateExpression="""
                     SET #status = :paused,
-                        updated_at = :now
+                        updated_at = :now,
+                        resume_state = :resume_state
                     REMOVE lock_owner, lock_expiry, lock_ttl
                 """,
                 ConditionExpression="lock_owner = :worker_id AND #status = :running",
@@ -352,10 +353,11 @@ class DynamoDBService:
                     ":paused": "paused",
                     ":worker_id": worker_id,
                     ":running": "running",
-                    ":now": now
+                    ":now": now,
+                    ":resume_state": resume_state
                 }
             )
-            logger.info(f"Job {job_id} paused")
+            logger.info(f"Job {job_id} paused with resume state: {resume_state}")
             return True
         except ClientError as e:
             if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
@@ -406,5 +408,34 @@ class DynamoDBService:
             return True
         except ClientError as e:
             if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                return False
+            raise
+
+    def update_resume_state(self, job_id: str, worker_id: str, resume_state: Dict[str, Any]) -> bool:
+        """Update resume_state for a paused job (without changing status)"""
+        now = int(time.time())
+        try:
+            self.table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression="""
+                    SET resume_state = :resume_state,
+                        updated_at = :now
+                """,
+                ConditionExpression="lock_owner = :worker_id AND #status = :paused",
+                ExpressionAttributeNames={
+                    "#status": "status"
+                },
+                ExpressionAttributeValues={
+                    ":resume_state": resume_state,
+                    ":worker_id": worker_id,
+                    ":paused": "paused",
+                    ":now": now
+                }
+            )
+            logger.info(f"Updated resume_state for job {job_id}: {resume_state}")
+            return True
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                logger.debug(f"Cannot update resume_state for job {job_id}")
                 return False
             raise

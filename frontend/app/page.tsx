@@ -1,9 +1,10 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { jobsApi, JobResponse } from '@/lib/api';
+import { jobsApi, JobResponse, ProgressUpdate } from '@/lib/api';
+import { JobStatusStream } from '@/lib/websocket';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 export default function Home() {
   const queryClient = useQueryClient();
@@ -12,8 +13,52 @@ export default function Home() {
   const { data: jobs, isLoading, error } = useQuery({
     queryKey: ['jobs', statusFilter],
     queryFn: () => jobsApi.list(statusFilter || undefined),
-    refetchInterval: 5000, // Poll every 5 seconds
+    refetchInterval: 5000, // Poll every 5 seconds as fallback
+    select: (data: JobResponse[]) => {
+      // Deduplicate by job_id in case of duplicates
+      const seen = new Set<string>();
+      return data.filter((job: JobResponse) => {
+        if (seen.has(job.job_id)) {
+          return false;
+        }
+        seen.add(job.job_id);
+        return true;
+      });
+    },
   });
+
+  // Set up SSE broadcast stream for real-time updates
+  useEffect(() => {
+    const stream = new JobStatusStream();
+    stream.connect(); // No jobId = get all updates
+
+    const unsubscribe = stream.onUpdate((update: ProgressUpdate) => {
+      // Update the specific job in React Query cache
+      queryClient.setQueryData(['jobs', statusFilter], (old: JobResponse[] | undefined) => {
+        if (!old) return old;
+        return old.map((j) => {
+          if (j.job_id === update.job_id) {
+            // Merge update with existing job data
+            return {
+              ...j,
+              status: update.status as any,
+              progress: update.progress,
+              ...(update.data && { result: update.data }),
+            };
+          }
+          return j;
+        });
+      });
+
+      // Remove invalidateQueries - it causes refetch which can create duplicates
+      // The cache update above is sufficient for real-time updates
+    });
+
+    return () => {
+      unsubscribe();
+      stream.disconnect();
+    };
+  }, [statusFilter, queryClient]);
 
   const cancelMutation = useMutation({
     mutationFn: jobsApi.cancel,

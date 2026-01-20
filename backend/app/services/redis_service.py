@@ -14,17 +14,19 @@ class RedisService:
         logger.info(f"Connected to Redis at {redis_url}")
 
     async def publish_job_update(self, job_id: str, update: Dict[str, Any]):
-        """Publish job progress update to Redis channel"""
-        channel = f"job:{job_id}"
+        """Publish job progress update to broadcast channel"""
+        channel = "jobs:all"
+        # Ensure job_id is in the update
+        update['job_id'] = job_id
         try:
             await self.redis_client.publish(channel, json.dumps(update))
-            logger.debug(f"Published update to channel {channel}")
+            logger.debug(f"Published update to broadcast channel {channel} for job {job_id}")
         except Exception as e:
             logger.error(f"Error publishing to Redis: {e}")
 
-    async def subscribe_to_job(self, job_id: str):
-        """Subscribe to job updates channel"""
-        channel = f"job:{job_id}"
+    async def subscribe_to_all_jobs(self):
+        """Subscribe to broadcast channel for all job updates"""
+        channel = "jobs:all"
         pubsub = self.redis_client.pubsub()
         await pubsub.subscribe(channel)
         return pubsub
