@@ -51,6 +51,15 @@ async def create_job(job_request: JobRequest):
         # For local development, we'll send directly
         sqs_service.send_job_message(job_id, "job_created")
         
+        # Publish job creation event to Redis for real-time updates
+        await redis_service.publish_job_update(job_id, {
+            "job_id": job_id,
+            "status": "pending",
+            "progress": 0,
+            "message": "Job created",
+            "timestamp": int(time.time())
+        })
+        
         return JobResponse(**job_item)
     except Exception as e:
         logger.error(f"Error creating job: {e}")

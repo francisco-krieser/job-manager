@@ -1,13 +1,14 @@
 'use client';
 
 import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { jobsApi, JobRequest } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
 export default function NewJobPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [jobType, setJobType] = useState<'data_processing' | 'report_generation' | 'image_resize'>('data_processing');
   const [metadata, setMetadata] = useState('{}');
   const [maxRetries, setMaxRetries] = useState(3);
@@ -15,6 +16,8 @@ export default function NewJobPage() {
   const createMutation = useMutation({
     mutationFn: jobsApi.create,
     onSuccess: (job) => {
+      // Invalidate jobs list so it appears immediately if user navigates back
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
       router.push(`/jobs/${job.job_id}`);
     },
   });

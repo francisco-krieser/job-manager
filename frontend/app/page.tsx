@@ -35,23 +35,38 @@ export default function Home() {
     const unsubscribe = stream.onUpdate((update: ProgressUpdate) => {
       // Update the specific job in React Query cache
       queryClient.setQueryData(['jobs', statusFilter], (old: JobResponse[] | undefined) => {
-        if (!old) return old;
-        return old.map((j) => {
-          if (j.job_id === update.job_id) {
-            // Merge update with existing job data
-            return {
-              ...j,
-              status: update.status as any,
-              progress: update.progress,
-              ...(update.data && { result: update.data }),
-            };
-          }
-          return j;
-        });
+        if (!old) {
+          // If no cache exists, invalidate to fetch the list
+          queryClient.invalidateQueries({ queryKey: ['jobs', statusFilter] });
+          return old;
+        }
+        
+        // Check if job exists in the current list
+        const jobExists = old.some((j) => j.job_id === update.job_id);
+        
+        if (jobExists) {
+          // Job exists - update it in place (fast, no network request)
+          return old.map((j) => {
+            if (j.job_id === update.job_id) {
+              return {
+                ...j,
+                status: update.status as any,
+                progress: update.progress,
+                ...(update.data && { result: update.data }),
+              };
+            }
+            return j;
+          });
+        } else {
+          // Job doesn't exist - invalidate to refetch full list
+          // This handles:
+          // 1. New jobs that were just created
+          // 2. Jobs that match the filter but weren't in the previous fetch
+          // 3. Jobs that transitioned to a status matching the filter
+          queryClient.invalidateQueries({ queryKey: ['jobs', statusFilter] });
+          return old; // Return old data while refetching
+        }
       });
-
-      // Remove invalidateQueries - it causes refetch which can create duplicates
-      // The cache update above is sufficient for real-time updates
     });
 
     return () => {
