@@ -3,28 +3,21 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { jobsApi, ProgressUpdate, JobResponse } from '@/lib/api';
 import { JobStatusStream } from '@/lib/websocket';
-import { useParams, useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { updateJobInAllCaches } from '@/lib/jobCache';
+import { useParams } from 'next/navigation';
+import { useEffect } from 'react';
 import Link from 'next/link';
 
 export default function JobDetailPage() {
   const params = useParams();
-  const router = useRouter();
   const jobId = params.id as string;
   const queryClient = useQueryClient();
-  const [streamUpdate, setStreamUpdate] = useState<ProgressUpdate | null>(null);
 
   const { data: job, isLoading, error } = useQuery({
     queryKey: ['job', jobId],
     queryFn: () => jobsApi.get(jobId),
-    refetchInterval: (query) => {
-      // Stop polling if job is completed, failed, or cancelled
-      const jobData = query.state.data as JobResponse | undefined;
-      if (jobData?.status && ['completed', 'failed', 'cancelled'].includes(jobData.status)) {
-        return false;
-      }
-      return 5000;
-    },
+    // No refetchInterval - SSE handles real-time updates
+    // Cache is just for instant display while fetching fresh data
   });
 
   const cancelMutation = useMutation({
@@ -59,9 +52,8 @@ export default function JobDetailPage() {
     stream.connect(jobId);
 
     const unsubscribe = stream.onUpdate((update) => {
-      setStreamUpdate(update);
-      // Invalidate query to refetch latest state
-      queryClient.invalidateQueries({ queryKey: ['job', jobId] });
+      // Update all caches immediately (no delay, no refetch needed)
+      updateJobInAllCaches(queryClient, update);
     });
 
     return () => {
@@ -78,10 +70,6 @@ export default function JobDetailPage() {
     return new Date(timestamp * 1000).toLocaleString();
   };
 
-  // Use stream update if available, otherwise use job data
-  const displayJob = streamUpdate || job;
-  const displayProgress = displayJob?.progress || 0;
-  const displayStatus = displayJob?.status || job?.status || 'unknown';
 
   if (isLoading) {
     return (
@@ -106,9 +94,11 @@ export default function JobDetailPage() {
     <div className="container">
       <div className="header">
         <h1>Job Details</h1>
-        <Link href="/" className="button button-secondary">
-          ← Back to Dashboard
-        </Link>
+        <div style={{ marginTop: '1rem', display: 'flex', gap: '1rem', alignItems: 'center' }}>
+          <Link href="/" className="button button-secondary">
+            ← Back to Dashboard
+          </Link>
+        </div>
       </div>
 
       <div className="card">
@@ -118,7 +108,7 @@ export default function JobDetailPage() {
             <code style={{ background: '#f5f5f5', padding: '0.25rem 0.5rem', borderRadius: '4px' }}>
               {job.job_id}
             </code>
-            <span className={getStatusBadgeClass(displayStatus)}>{displayStatus}</span>
+            <span className={getStatusBadgeClass(job.status)}>{job.status}</span>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
@@ -143,22 +133,17 @@ export default function JobDetailPage() {
             )}
           </div>
 
-          {(displayStatus === 'running' || displayStatus === 'pending') && (
+          {(job.status === 'running' || job.status === 'pending') && (
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
                 <strong>Progress</strong>
-                <span>{displayProgress}%</span>
+                <span>{job.progress}%</span>
               </div>
               <div className="progress-bar">
-                <div className="progress-fill" style={{ width: `${displayProgress}%` }}>
-                  {displayProgress}%
+                <div className="progress-fill" style={{ width: `${job.progress}%` }}>
+                  {job.progress}%
                 </div>
               </div>
-              {streamUpdate?.message && (
-                <div style={{ marginTop: '0.5rem', color: '#666', fontStyle: 'italic' }}>
-                  {streamUpdate.message}
-                </div>
-              )}
             </div>
           )}
 
@@ -189,7 +174,7 @@ export default function JobDetailPage() {
         </div>
 
         <div style={{ display: 'flex', gap: '1rem', paddingTop: '1rem', borderTop: '1px solid #e0e0e0' }}>
-          {displayStatus === 'running' && (
+          {job.status === 'running' && (
             <>
               <button
                 className="button button-secondary"
@@ -207,7 +192,7 @@ export default function JobDetailPage() {
               </button>
             </>
           )}
-          {displayStatus === 'paused' && (
+          {job.status === 'paused' && (
             <button
               className="button button-primary"
               onClick={() => resumeMutation.mutate(job.job_id)}

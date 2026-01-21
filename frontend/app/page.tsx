@@ -3,6 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { jobsApi, JobResponse, ProgressUpdate } from '@/lib/api';
 import { JobStatusStream } from '@/lib/websocket';
+import { updateJobInAllCaches } from '@/lib/jobCache';
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
 
@@ -13,7 +14,8 @@ export default function Home() {
   const { data: jobs, isLoading, error } = useQuery({
     queryKey: ['jobs', statusFilter],
     queryFn: () => jobsApi.list(statusFilter || undefined),
-    refetchInterval: 5000, // Poll every 5 seconds as fallback
+    // No refetchInterval - SSE handles real-time updates
+    // Cache is just for instant display while fetching fresh data
     select: (data: JobResponse[]) => {
       // Deduplicate by job_id in case of duplicates
       const seen = new Set<string>();
@@ -33,47 +35,15 @@ export default function Home() {
     stream.connect(); // No jobId = get all updates
 
     const unsubscribe = stream.onUpdate((update: ProgressUpdate) => {
-      // Update the specific job in React Query cache
-      queryClient.setQueryData(['jobs', statusFilter], (old: JobResponse[] | undefined) => {
-        if (!old) {
-          // If no cache exists, invalidate to fetch the list
-          queryClient.invalidateQueries({ queryKey: ['jobs', statusFilter] });
-          return old;
-        }
-        
-        // Check if job exists in the current list
-        const jobExists = old.some((j) => j.job_id === update.job_id);
-        
-        if (jobExists) {
-          // Job exists - update it in place (fast, no network request)
-          return old.map((j) => {
-            if (j.job_id === update.job_id) {
-              return {
-                ...j,
-                status: update.status as any,
-                progress: update.progress,
-                ...(update.data && { result: update.data }),
-              };
-            }
-            return j;
-          });
-        } else {
-          // Job doesn't exist - invalidate to refetch full list
-          // This handles:
-          // 1. New jobs that were just created
-          // 2. Jobs that match the filter but weren't in the previous fetch
-          // 3. Jobs that transitioned to a status matching the filter
-          queryClient.invalidateQueries({ queryKey: ['jobs', statusFilter] });
-          return old; // Return old data while refetching
-        }
-      });
+      // Update all caches immediately (no delay, no refetch needed)
+      updateJobInAllCaches(queryClient, update);
     });
 
     return () => {
       unsubscribe();
       stream.disconnect();
     };
-  }, [statusFilter, queryClient]);
+  }, [queryClient]);
 
   const cancelMutation = useMutation({
     mutationFn: jobsApi.cancel,
