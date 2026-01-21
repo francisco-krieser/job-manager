@@ -3,14 +3,15 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { jobsApi, JobRequest } from '@/lib/api';
+import { JobType, getDefaultMetadata } from '@/lib/jobTypes';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
 export default function NewJobPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const [jobType, setJobType] = useState<'data_processing' | 'report_generation' | 'image_resize'>('data_processing');
-  const [metadata, setMetadata] = useState('{}');
+  const [jobType, setJobType] = useState<JobType>('data_processing');
+  const [metadata, setMetadata] = useState<string>(() => getDefaultMetadata('data_processing'));
   const [maxRetries, setMaxRetries] = useState(3);
 
   const createMutation = useMutation({
@@ -42,27 +43,18 @@ export default function NewJobPage() {
     createMutation.mutate(jobRequest);
   };
 
-  const getDefaultMetadata = (type: string) => {
-    switch (type) {
-      case 'data_processing':
-        return JSON.stringify({ chunks: 10, delay_seconds: 2 }, null, 2);
-      case 'report_generation':
-        return JSON.stringify({ report_type: 'summary', pages: 5 }, null, 2);
-      case 'image_resize':
-        return JSON.stringify({ image_count: 3, sizes: ['thumb', 'medium', 'large'] }, null, 2);
-      default:
-        return '{}';
-    }
-  };
-
   const handleJobTypeChange = (newType: string) => {
-    setJobType(newType as any);
-    setMetadata(getDefaultMetadata(newType));
+    const typedNewType = newType as JobType;
+    setJobType(typedNewType);
+    setMetadata(getDefaultMetadata(typedNewType));
   };
 
   return (
     <div className="container">
-      <div className="header">
+      <div
+        className="header"
+        style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '0.75rem' }}
+      >
         <h1>Create New Job</h1>
         <Link href="/" className="button button-secondary">
           ← Back to Dashboard
