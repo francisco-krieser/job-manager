@@ -28,15 +28,48 @@ aws dynamodb wait table-exists \
   --table-name jobs \
   --region $REGION
 
-echo "Creating SQS queue..."
+echo "Creating Dead Letter Queue (DLQ)..."
 
 aws sqs create-queue \
   --endpoint-url $ENDPOINT \
-  --queue-name job-queue \
+  --queue-name job-dlq \
   --attributes \
-    VisibilityTimeout=300,MessageRetentionPeriod=1209600 \
+    MessageRetentionPeriod=1209600 \
   --region $REGION \
   --no-cli-pager
+
+echo "Getting DLQ ARN..."
+DLQ_URL=$(aws sqs get-queue-url \
+  --endpoint-url $ENDPOINT \
+  --queue-name job-dlq \
+  --region $REGION \
+  --query 'QueueUrl' \
+  --output text)
+
+# LocalStack account ID is always 000000000000; derive ARN from URL
+DLQ_ARN="arn:aws:sqs:${REGION}:000000000000:job-dlq"
+
+echo "Creating SQS queue with DLQ redrive policy..."
+
+# Create attributes JSON file to avoid shell quoting issues
+ATTRIBUTES_FILE=$(mktemp)
+cat > "$ATTRIBUTES_FILE" <<EOF
+{
+  "VisibilityTimeout": "300",
+  "MessageRetentionPeriod": "1209600",
+  "RedrivePolicy": "{\"deadLetterTargetArn\":\"$DLQ_ARN\",\"maxReceiveCount\":\"3\"}"
+}
+EOF
+
+aws sqs create-queue \
+  --endpoint-url "$ENDPOINT" \
+  --queue-name job-queue \
+  --attributes file://"$ATTRIBUTES_FILE" \
+  --region "$REGION" \
+  --no-cli-pager
+
+# Clean up temp file
+rm -f "$ATTRIBUTES_FILE"
 
 echo "Getting queue URL..."
 QUEUE_URL=$(aws sqs get-queue-url \
@@ -47,4 +80,5 @@ QUEUE_URL=$(aws sqs get-queue-url \
   --output text)
 
 echo "Queue URL: $QUEUE_URL"
+echo "DLQ ARN: $DLQ_ARN"
 echo "Setup complete!"
